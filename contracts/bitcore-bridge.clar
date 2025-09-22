@@ -155,3 +155,105 @@
     (ok true)
   )
 )
+
+(define-public (update-max-deposit (new-max uint))
+  (begin
+    (try! (check-is-bridge-owner))
+    (asserts! (> new-max u0) ERR-INVALID-AMOUNT)
+    (asserts! (< new-max u100000000) ERR-INVALID-AMOUNT)
+    (var-set max-deposit-amount new-max)
+    (ok true)
+  )
+)
+
+;; CORE BRIDGE FUNCTIONALITY
+(define-public (deposit-bitcoin
+    (btc-tx-hash (string-ascii 64))
+    (amount uint)
+    (recipient principal)
+  )
+  (let (
+      (fee (/ (* amount (var-get bridge-fee-percentage)) u1000))
+      (net-amount (- amount fee))
+      (is-whitelisted (default-to false (map-get? recipient-whitelist recipient)))
+    )
+    ;; Input validation checks
+    (asserts! (is-valid-tx-hash btc-tx-hash) ERR-INVALID-TX-HASH)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (<= amount (var-get max-deposit-amount)) ERR-MAX-DEPOSIT-EXCEEDED)
+    (asserts! (is-valid-principal recipient) ERR-INVALID-RECIPIENT)
+    (asserts! is-whitelisted ERR-INVALID-RECIPIENT)
+
+    ;; Bridge state validation
+    (asserts! (not (var-get is-bridge-paused)) ERR-BRIDGE-PAUSED)
+    (asserts!
+      (is-none (map-get? processed-transactions { tx-hash: btc-tx-hash }))
+      ERR-TRANSACTION-ALREADY-PROCESSED
+    )
+
+    ;; Bitcoin transaction validation through oracle network
+    (try! (validate-bitcoin-transaction btc-tx-hash amount))
+
+    ;; Mint BitCore-BTC tokens to recipient
+    (try! (ft-mint? bitcore-btc net-amount recipient))
+
+    ;; Update protocol state
+    (map-set processed-transactions { tx-hash: btc-tx-hash } true)
+    (var-set total-locked-bitcoin (+ (var-get total-locked-bitcoin) amount))
+
+    (ok net-amount)
+  )
+)
+
+;; BITCOIN TRANSACTION VALIDATION
+(define-private (validate-bitcoin-transaction
+    (btc-tx-hash (string-ascii 64))
+    (amount uint)
+  )
+  (let ((authorized-validator (default-to false (map-get? authorized-oracles tx-sender))))
+    (asserts! (is-valid-tx-hash btc-tx-hash) ERR-INVALID-TX-HASH)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! authorized-validator ERR-NOT-AUTHORIZED)
+    (ok true)
+  )
+)
+
+;; AUTHORIZATION HELPER
+(define-private (check-is-bridge-owner)
+  (begin
+    (asserts! (is-eq tx-sender (var-get bridge-owner)) ERR-NOT-AUTHORIZED)
+    (ok true)
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+(define-read-only (get-total-locked-bitcoin)
+  (var-get total-locked-bitcoin)
+)
+
+(define-read-only (get-user-balance (user principal))
+  (get-user-balance-amount user)
+)
+
+(define-read-only (is-oracle-authorized (oracle principal))
+  (default-to false (map-get? authorized-oracles oracle))
+)
+
+(define-read-only (get-bridge-status)
+  {
+    is-paused: (var-get is-bridge-paused),
+    total-locked: (var-get total-locked-bitcoin),
+    bridge-fee: (var-get bridge-fee-percentage),
+    max-deposit: (var-get max-deposit-amount),
+  }
+)
+
+;; BALANCE HELPER FUNCTION
+(define-private (get-user-balance-amount (user principal))
+  (let ((balance-opt (map-get? user-balances { user: user })))
+    (if (is-some balance-opt)
+      (get amount (unwrap-panic balance-opt))
+      u0
+    )
+  )
+)
